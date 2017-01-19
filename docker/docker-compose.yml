@@ -1,0 +1,4 @@
+reservationservice:
+    image: dfens/reservation-service
+    ports:
+      - "8080:8080"

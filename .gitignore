@@ -1,4 +1,4 @@
-.gradle
+reservation-service/.gradle
 /build/
 !gradle/wrapper/gradle-wrapper.jar
 
