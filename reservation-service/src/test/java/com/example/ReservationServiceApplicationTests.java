@@ -17,7 +17,7 @@ public class ReservationServiceApplicationTests {
 
 	@Test public void helloWorldTest() {
 
-		assertThat("Hello World").isEqualTo("Hello World");
+		assertThat("Hello World fail").isEqualTo("Hello World");
 	}
 
 }
