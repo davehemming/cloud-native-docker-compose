@@ -1,0 +1,223 @@
+Parameters:
+  KeyName:
+    Description: The EC2 Key Pair to allow SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+  EIP:
+    Description: The Elastic IP to associate with the Rancher Server
+    Type: String
+Resources:
+  User:
+    Type: AWS::IAM::User
+    Properties:
+      UserName:
+        Fn::Join:
+          ["-", ["Ref": "AWS::Region", "rancher-user"]]
+  Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: rancher-policy
+      Users:
+        - Ref: User
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action:
+            - ec2:*
+          Effect: Allow
+          Resource: "*"
+          Condition:
+            StringEquals:
+              ec2:Region: ap-southeast-2
+        - Action:
+            - iam:ListInstanceProfiles
+          Effect: Allow
+          Resource: "*"
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: rancher-igw
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      InstanceTenancy: default
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: rancher-vpc
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId:
+        Ref: InternetGateway
+      VpcId:
+        Ref: VPC
+  SubnetPublic:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      AvailabilityZone: ap-southeast-2a
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: rancher-subnet-public
+  SubnetPrivate:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      AvailabilityZone: ap-southeast-2a
+      CidrBlock: 10.0.2.0/24
+      Tags:
+        - Key: Name
+          Value: rancher-subnet-private
+  RouteTablePublic:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+      Tags:
+        - Key: Name
+          Value: rancher-subnet-rt-public
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: RouteTablePublic
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+  RouteTablePrivate:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+      Tags:
+        - Key: Name
+          Value: rancher-subnet-rt-private
+  RouteTableAssociationPublic:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: RouteTablePublic
+      SubnetId:
+        Ref: SubnetPublic
+  RouteTableAssociationPrivate:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: RouteTablePrivate
+      SubnetId:
+        Ref: SubnetPrivate
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open ports needed for Rancher and Docker
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          FromPort: "8"
+          ToPort: "-1"
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: "80"
+          ToPort: "80"
+          CidrIp: 0.0.0.0/0
+        # needed for Docker machine to provision hosts
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: "2376"
+          ToPort: "2376"
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: "8080"
+          ToPort: "8080"
+          CidrIp: 0.0.0.0/0
+        # needed for Rancher network
+        - IpProtocol: udp
+          FromPort: "500"
+          ToPort: "500"
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: "4500"
+          ToPort: "4500"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: rancher-security-group
+  Ec2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      AvailabilityZone: ap-southeast-2a
+      ImageId: ami-ae6259cd
+      KeyName:
+        Ref: KeyName
+      SecurityGroupIds:
+        - Ref: InstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: rancher-server
+      SubnetId:
+        Ref: SubnetPublic
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+
+          # update and upgrade
+          apt-get update
+          apt-get -y install language-pack-en
+          apt-get -y dist-upgrade
+          apt-get -y upgrade
+
+          # Before you install Docker for the first time
+          # on a new host machine, you need to set up
+          # the Docker repository.
+
+          # install the linux-image-extra-* packages,
+          # which allow Docker to use the aufs storage
+          # drivers
+          apt-get -y install curl \
+            linux-image-extra-$(uname -r) \
+            linux-image-extra-virtual
+
+          # install packages to allow apt to use a
+          # repository over HTTPS
+          apt-get -y install apt-transport-https \
+            ca-certificates
+
+          # add Docker’s official GPG key
+          curl -fsSL https://yum.dockerproject.org/gpg | apt-key add -
+
+          # verify that the key ID is
+          # 58118E89F3A912897C070ADBF76221572C52609D
+          # TODO: This should probably be an if statement
+          apt-key fingerprint \
+            58118E89F3A912897C070ADBF76221572C52609D
+
+          # set up the stable repository
+          add-apt-repository \
+           "deb https://apt.dockerproject.org/repo/ \
+           ubuntu-$(lsb_release -cs) \
+           main"
+
+          apt-get -y update
+
+          # install the latest version of Docker
+          apt-get -y install docker-engine
+
+  IPAssoc:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId:
+        Ref: Ec2Instance
+      EIP:
+        Ref: EIP
