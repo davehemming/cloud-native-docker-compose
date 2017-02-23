@@ -1,15 +1,26 @@
 #!/usr/bin/env bash
 
-declare aws_env_key_file=
-declare -r aws_cf_template="`dirname $0`/rancher-env-aws-cf.template"
-declare -r aws_cf_stack_name="rancher-stack"
+declare aws_key_file=
+declare -r aws_cf_net_template="`dirname $0`/aws-cf-rancher-net.template"
+declare -r aws_cf_env_template="`dirname $0`/aws-cf-rancher-env.template"
+declare -r aws_cf_net_stack_name="rancher-net-stack"
+declare -r aws_cf_env_stack_name="rancher-env-stack"
 declare -r rs_instance_name="rancher-server"
+declare -r rs_tag="v1.3.4"
 declare rs_eip=
 declare rs_instance_id=
 declare rs_instance_state=
 declare rs_public_ip=
 declare rs_system_status=
 declare rs_instance_status=
+declare rancher_net_stack_exists=$(aws cloudformation describe-stacks \
+--stack-name $aws_cf_net_stack_name \
+--output text \
+--query 'Stacks[*].StackName' &> /dev/null; echo $?)
+declare rancher_env_stack_exists=$(aws cloudformation describe-stacks \
+--stack-name $aws_cf_env_stack_name \
+--output text \
+--query 'Stacks[*].StackName' &> /dev/null; echo $?)
 
 while getopts "i:k:" opt; do
   case $opt in
@@ -17,7 +28,7 @@ while getopts "i:k:" opt; do
       rs_eip="${OPTARG}"
       ;;
     k)
-      aws_env_key_file="${OPTARG}"
+      aws_key_file="${OPTARG}"
       ;;
     \?)
       echo "invalid option: -${OPTARG}" >&2
@@ -30,10 +41,10 @@ while getopts "i:k:" opt; do
   esac
 done
 
-if [[ ! $aws_env_key_file ]]; then
+if [[ ! $aws_key_file ]]; then
   echo "aws key file path has not been set. Use the -k option to set it." >&2
   exit 1
-elif [[ ! -e $aws_env_key_file ]]; then
+elif [[ ! -e $aws_key_file ]]; then
   echo "aws key file does not exist" >&2
   exit 1
 fi
@@ -43,50 +54,68 @@ if [[ ! $rs_eip ]]; then
   exit 1
 fi
 
-if [[ ! -e $aws_cf_template ]]; then
-  echo "the aws cloud formation template file '${aws_cf_template}' does not exist" >&2
+if [[ ! -e $aws_cf_net_template ]]; then
+  echo "the aws cloud formation template file '${aws_cf_net_template}' does not exist" >&2
   exit 1
 fi
 
-aws_stack_exists=$(aws cloudformation describe-stacks \
---stack-name $aws_cf_stack_name \
---output text \
---query 'Stacks[*].StackName' &> /dev/null; echo $?)
-
-if [[ $aws_stack_exists -eq 0 ]]; then
-  echo "an aws cloudformation stack with the name '${aws_cf_stack_name}' already exists.\
+if [[ $rancher_env_stack_exists -eq 0 ]]; then
+  echo "an aws cloudformation stack with the name '${aws_cf_env_stack_name}' already exists.\
   Please delete it before rerunning this script." >&2
   exit 1
-else
-  echo "creating an aws cloudformation stack with the name '${aws_cf_stack_name}'" >&2
+fi
+
+if [[ $rancher_net_stack_exists -ne 0 ]]; then
+  echo "creating an aws cloudformation stack with the name '${aws_cf_net_stack_name}'" >&2
   echo -n "..." >&2
 
-  declare -r aws_env_key_file_name=$(basename $aws_env_key_file ".pem")
-
   aws cloudformation create-stack \
-  --stack-name $aws_cf_stack_name \
-  --template-body "file://$aws_cf_template" \
-  --parameters ParameterKey=KeyName,ParameterValue=$aws_env_key_file_name \
-  ParameterKey=EIP,ParameterValue=$rs_eip \
+  --stack-name $aws_cf_net_stack_name \
+  --template-body "file://$aws_cf_net_template" \
   --capabilities CAPABILITY_NAMED_IAM > /dev/null 2>&1
 
-  aws_cf_stack_creation_status=
-  while [[ $aws_cf_stack_creation_status != "CREATE_COMPLETE" ]]; do
-    aws_cf_stack_creation_status=$(aws cloudformation describe-stacks \
-    --stack-name $aws_cf_stack_name \
+  aws_cf_env_stack_creation_status=
+  while [[ $aws_cf_env_stack_creation_status != "CREATE_COMPLETE" ]]; do
+    aws_cf_env_stack_creation_status=$(aws cloudformation describe-stacks \
+    --stack-name $aws_cf_net_stack_name \
     --output text \
     --query 'Stacks[*].StackStatus')
 
-    if [[ $aws_cf_stack_creation_status == "CREATE_COMPLETE" ]]; then
+    if [[ $aws_cf_env_stack_creation_status == "CREATE_COMPLETE" ]]; then
       echo
-  	  echo "aws cloudformation stack with the name '${aws_cf_stack_name}' has been created" >&2
+  	  echo "aws cloudformation environment stack with the name '${aws_cf_net_stack_name}' has been created" >&2
     else
       echo -n "." >&2
       sleep 1
     fi
   done
-
 fi
+
+echo "creating an aws cloudformation stack with the name '${aws_cf_env_stack_name}'" >&2
+echo -n "..." >&2
+
+declare -r aws_key_file_name=$(basename $aws_key_file ".pem")
+aws cloudformation create-stack \
+--stack-name $aws_cf_env_stack_name \
+--template-body "file://$aws_cf_env_template" \
+--parameters ParameterKey=KeyName,ParameterValue=$aws_key_file_name \
+ParameterKey=EIP,ParameterValue=$rs_eip > /dev/null 2>&1
+
+aws_cf_server_stack_creation_status=
+while [[ $aws_cf_server_stack_creation_status != "CREATE_COMPLETE" ]]; do
+  aws_cf_server_stack_creation_status=$(aws cloudformation describe-stacks \
+  --stack-name $aws_cf_env_stack_name \
+  --output text \
+  --query 'Stacks[*].StackStatus')
+
+  if [[ $aws_cf_server_stack_creation_status == "CREATE_COMPLETE" ]]; then
+    echo
+    echo "aws cloudformation stack with the name '${aws_cf_net_stack_name}' has been created" >&2
+  else
+    echo -n "." >&2
+    sleep 1
+  fi
+done
 
 echo "waiting for rancher server to come up" >&2
 echo -n "..."
@@ -133,7 +162,7 @@ echo "waiting for docker to finish installing" >&2
 echo -n "..."
 while [[ $rs_docker_installed -ne 1 ]]; do
   rs_docker_installed=$(ssh -o "StrictHostKeyChecking no" \
-  -i $aws_env_key_file ubuntu@$rs_public_ip \
+  -i $aws_key_file ubuntu@$rs_public_ip \
    "command -v docker &> /dev/null && echo 1 || echo 0" 2>/dev/null)
 
   if [[ $rs_docker_installed -eq 1 ]]; then
@@ -147,7 +176,7 @@ done
 
 ## check if a reboot is required due to system upgrades that were applied during initial system provisioning
 rs_reboot_required=$(ssh -o "StrictHostKeyChecking no" \
--i $aws_env_key_file ubuntu@$rs_public_ip \
+-i $aws_key_file ubuntu@$rs_public_ip \
 "if [[ -f /var/run/reboot-required ]]; then echo 1; else echo 0; fi" 2>/dev/null)
 
 if [[ $rs_reboot_required -eq 1 ]]; then
@@ -213,8 +242,8 @@ fi
 
 echo "starting the rancher server docker image"
 ssh -o "StrictHostKeyChecking no" \
--i $aws_env_key_file ubuntu@$rs_public_ip \
-"sudo docker run -d --restart=unless-stopped -p 8080:8080 rancher/server" 2>/dev/null
+-i $aws_key_file ubuntu@$rs_public_ip \
+"sudo docker run -d --restart=unless-stopped -p 8080:8080 rancher/server:$rs_tag" 2>/dev/null
 
 echo "waiting for the rancher server docker image to start running"
 echo -n "..."

@@ -1,0 +1,353 @@
+Parameters:
+  AvailabilityZone:
+    Description: Select the Availability Zone for your Deployment
+    Type: AWS::EC2::AvailabilityZone::Name
+  KeyName:
+    Description: The EC2 Key Pair to allow SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+  EIP:
+    Description: The Elastic IP to associate with the Rancher Server
+    Type: String
+  AMI:
+    Description: The linux image id to use for the ec2 instances
+    Type: String
+Resources:
+  KubernetesMasterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Join:
+          ["-", ["Ref": "AWS::Region", "kubernetes-master-role"]]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: kubernetes-master-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - ec2:*
+              Resource:
+              - "*"
+            - Effect: Allow
+              Action:
+              - elasticloadbalancing:*
+              Resource:
+              - "*"
+            - Effect: Allow
+              Action:
+              - route53:*
+              Resource:
+              - "*"
+            - Effect: Allow
+              Action: s3:*
+              Resource:
+              - arn:aws:s3:::kubernetes-*
+  KubernetesNodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Join:
+          ["-", ["Ref": "AWS::Region", "kubernetes-node-role"]]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: kubernetes-node-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action: s3:*
+              Resource:
+              - arn:aws:s3:::kubernetes-*
+            - Effect: Allow
+              Action: ec2:Describe*
+              Resource: "*"
+            - Effect: Allow
+              Action: ec2:AttachVolume
+              Resource: "*"
+            - Effect: Allow
+              Action: ec2:DetachVolume
+              Resource: "*"
+            - Effect: Allow
+              Action:
+              - route53:*
+              Resource:
+              - "*"
+            - Effect: Allow
+              Action:
+              - ecr:GetAuthorizationToken
+              - ecr:BatchCheckLayerAvailability
+              - ecr:GetDownloadUrlForLayer
+              - ecr:GetRepositoryPolicy
+              - ecr:DescribeRepositories
+              - ecr:ListImages
+              - ecr:BatchGetImage
+              Resource: "*"
+  KubernetesMasterInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref KubernetesMasterRole
+  KubernetesNodeInstanceProfile:
+      Type: AWS::IAM::InstanceProfile
+      Properties:
+        Roles:
+          - !Ref KubernetesNodeRole
+  EC2RancherServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      AvailabilityZone: !Ref AvailabilityZone
+      ImageId: !Ref AMI
+      KeyName:
+        Ref: KeyName
+      SecurityGroupIds:
+        - !ImportValue InstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: rancher-server
+      SubnetId: !ImportValue SubnetPublic
+      IamInstanceProfile: !Ref KubernetesMasterInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -x
+
+          # log script output to file
+          exec > /tmp/part-001.log 2>&1
+
+          # set to noninteractive mode
+          export DEBIAN_FRONTEND=noninteractive
+
+          # update and upgrade
+          apt-get update
+          apt-get -y install language-pack-en
+          apt-get -y dist-upgrade
+          apt-get -y upgrade
+
+          # Before you install Docker for the first time
+          # on a new host machine, you need to set up
+          # the Docker repository.
+
+          # install the linux-image-extra-* packages,
+          # which allow Docker to use the aufs storage
+          # drivers
+          apt-get -y install curl \
+            linux-image-extra-$(uname -r) \
+            linux-image-extra-virtual
+
+          # install packages to allow apt to use a
+          # repository over HTTPS
+          apt-get -y install apt-transport-https \
+            ca-certificates
+
+          # add Docker’s official GPG key
+          curl -fsSL https://yum.dockerproject.org/gpg | apt-key add -
+
+          # verify that the key ID is
+          # 58118E89F3A912897C070ADBF76221572C52609D
+          # TODO: This should probably be an if statement
+          apt-key fingerprint \
+            58118E89F3A912897C070ADBF76221572C52609D
+
+          # set up the stable repository
+          add-apt-repository \
+           "deb https://apt.dockerproject.org/repo/ \
+           ubuntu-$(lsb_release -cs) \
+           main"
+
+          apt-get -y update
+
+          # install the latest version of Docker
+          apt-get -y install docker-engine=1.12.6-0~ubuntu-xenial
+
+          # install the rancher server
+          docker run -d --restart=unless-stopped -p 8080:8080 rancher/server:v1.4.1
+
+          usermod -aG docker ubuntu
+          shutdown -h now
+
+  EC2RancherHost01:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      AvailabilityZone: !Ref AvailabilityZone
+      ImageId: !Ref AMI
+      KeyName:
+        Ref: KeyName
+      SecurityGroupIds:
+        - !ImportValue InstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: rancher-host-01
+      SubnetId: !ImportValue SubnetPublic
+      IamInstanceProfile: !Ref KubernetesMasterInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -x
+
+          # log script output to file
+          exec > /tmp/part-001.log 2>&1
+
+          # set to noninteractive mode
+          export DEBIAN_FRONTEND=noninteractive
+
+          # update and upgrade
+          apt-get update
+          apt-get -y install language-pack-en
+          apt-get -y dist-upgrade
+          apt-get -y upgrade
+
+          # Before you install Docker for the first time
+          # on a new host machine, you need to set up
+          # the Docker repository.
+
+          # install the linux-image-extra-* packages,
+          # which allow Docker to use the aufs storage
+          # drivers
+          apt-get -y install curl \
+            linux-image-extra-$(uname -r) \
+            linux-image-extra-virtual
+
+          # install packages to allow apt to use a
+          # repository over HTTPS
+          apt-get -y install apt-transport-https \
+            ca-certificates
+
+          # add Docker’s official GPG key
+          curl -fsSL https://yum.dockerproject.org/gpg | apt-key add -
+
+          # verify that the key ID is
+          # 58118E89F3A912897C070ADBF76221572C52609D
+          # TODO: This should probably be an if statement
+          apt-key fingerprint \
+            58118E89F3A912897C070ADBF76221572C52609D
+
+          # set up the stable repository
+          add-apt-repository \
+           "deb https://apt.dockerproject.org/repo/ \
+           ubuntu-$(lsb_release -cs) \
+           main"
+
+          apt-get -y update
+
+          # install the latest version of Docker
+          apt-get -y install docker-engine=1.12.6-0~ubuntu-xenial
+
+          usermod -aG docker ubuntu
+          shutdown -h now
+
+          # Run this command after you restart your ec2 instances:
+          #
+          # declare host_ip=<YOUR_HOST_IP>; \
+          # declare server_ip=<YOUR_SERVER_IP>; \
+          # ssh-keygen -R $host_ip > /dev/null 2>&1; \
+          # ssh -o "StrictHostKeyChecking no" -i /Users/davidhemming/Dev/aws/ssh-keys/aws-default.pem \
+          # ubuntu@$host_ip "sudo docker run -d --privileged -v /var/run/docker.sock:/var/run/docker.sock \
+          # -v /var/lib/rancher:/var/lib/rancher rancher/agent:v1.1.3 \
+          # http://$server_ip:8080/v1/scripts/EB71529F29653C995C7A:1486522800000:j0uruEL5U0k7GiHKGXPmIAz1mJM"
+
+  EC2RancherHost02:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      AvailabilityZone: !Ref AvailabilityZone
+      ImageId: !Ref AMI
+      KeyName:
+        Ref: KeyName
+      SecurityGroupIds:
+        - !ImportValue InstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: rancher-host-02
+      SubnetId: !ImportValue SubnetPublic
+      IamInstanceProfile: !Ref KubernetesNodeInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -x
+
+          # log script output to file
+          exec > /tmp/part-001.log 2>&1
+
+          # set to noninteractive mode
+          export DEBIAN_FRONTEND=noninteractive
+
+          # update and upgrade
+          apt-get update
+          apt-get -y install language-pack-en
+          apt-get -y dist-upgrade
+          apt-get -y upgrade
+
+          # Before you install Docker for the first time
+          # on a new host machine, you need to set up
+          # the Docker repository.
+
+          # install the linux-image-extra-* packages,
+          # which allow Docker to use the aufs storage
+          # drivers
+          apt-get -y install curl \
+            linux-image-extra-$(uname -r) \
+            linux-image-extra-virtual
+
+          # install packages to allow apt to use a
+          # repository over HTTPS
+          apt-get -y install apt-transport-https \
+            ca-certificates
+
+          # add Docker’s official GPG key
+          curl -fsSL https://yum.dockerproject.org/gpg | apt-key add -
+
+          # verify that the key ID is
+          # 58118E89F3A912897C070ADBF76221572C52609D
+          # TODO: This should probably be an if statement
+          apt-key fingerprint \
+            58118E89F3A912897C070ADBF76221572C52609D
+
+          # set up the stable repository
+          add-apt-repository \
+           "deb https://apt.dockerproject.org/repo/ \
+           ubuntu-$(lsb_release -cs) \
+           main"
+
+          apt-get -y update
+
+          # install the latest version of Docker
+          apt-get -y install docker-engine=1.12.6-0~ubuntu-xenial
+
+          usermod -aG docker ubuntu
+          shutdown -h now
+
+          # Run this command after you restart your ec2 instances:
+          #
+          # declare host_ip=<YOUR_HOST_IP>; \
+          # declare server_ip=<YOUR_SERVER_IP>; \
+          # ssh-keygen -R $host_ip > /dev/null 2>&1; \
+          # ssh -o "StrictHostKeyChecking no" -i /Users/davidhemming/Dev/aws/ssh-keys/aws-default.pem \
+          # ubuntu@$host_ip "sudo docker run -d --privileged -v /var/run/docker.sock:/var/run/docker.sock \
+          # -v /var/lib/rancher:/var/lib/rancher rancher/agent:v1.1.3 \
+          # http://$server_ip:8080/v1/scripts/EB71529F29653C995C7A:1486522800000:j0uruEL5U0k7GiHKGXPmIAz1mJM"
+
+  IPAssoc:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId:
+        Ref: EC2RancherServer
+      EIP:
+        Ref: EIP
+  EBSVolumeAttachmentRancherHost01:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref EC2RancherHost01
+      VolumeId: !ImportValue EBSVolume01

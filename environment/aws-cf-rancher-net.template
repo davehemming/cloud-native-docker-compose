@@ -1,10 +1,7 @@
 Parameters:
-  KeyName:
-    Description: The EC2 Key Pair to allow SSH access to the instance
-    Type: AWS::EC2::KeyPair::KeyName
-  EIP:
-    Description: The Elastic IP to associate with the Rancher Server
-    Type: String
+  AvailabilityZone:
+    Description: Select the Availability Zone for your Deployment
+    Type: AWS::EC2::AvailabilityZone::Name
 Resources:
   User:
     Type: AWS::IAM::User
@@ -25,9 +22,9 @@ Resources:
             - ec2:*
           Effect: Allow
           Resource: "*"
-          Condition:
-            StringEquals:
-              ec2:Region: ap-southeast-2
+#          Condition:
+#            StringEquals:
+#              ec2:Region: ap-southeast-2 # Is it possible to not hardcode this?
         - Action:
             - iam:ListInstanceProfiles
           Effect: Allow
@@ -59,7 +56,7 @@ Resources:
     Properties:
       VpcId:
         Ref: VPC
-      AvailabilityZone: ap-southeast-2a
+      AvailabilityZone: !Ref AvailabilityZone
       CidrBlock: 10.0.1.0/24
       MapPublicIpOnLaunch: true
       Tags:
@@ -70,7 +67,7 @@ Resources:
     Properties:
       VpcId:
         Ref: VPC
-      AvailabilityZone: ap-southeast-2a
+      AvailabilityZone: !Ref AvailabilityZone
       CidrBlock: 10.0.2.0/24
       Tags:
         - Key: Name
@@ -153,71 +150,33 @@ Resources:
       Tags:
         - Key: Name
           Value: rancher-security-group
-  Ec2Instance:
-    Type: AWS::EC2::Instance
+  AllPortsSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
     Properties:
-      InstanceType: t2.micro
-      AvailabilityZone: ap-southeast-2a
-      ImageId: ami-ae6259cd
-      KeyName:
-        Ref: KeyName
-      SecurityGroupIds:
-        - Ref: InstanceSecurityGroup
+      IpProtocol: "-1"
+      FromPort: "-1"
+      ToPort: "-1"
+      GroupId: !Ref InstanceSecurityGroup
+      SourceSecurityGroupId: !Ref InstanceSecurityGroup
+  EBSVolume01:
+    Type: AWS::EC2::Volume
+    Properties:
+      VolumeType: gp2
+      AvailabilityZone: !Ref AvailabilityZone
+      Size: 40
       Tags:
         - Key: Name
-          Value: rancher-server
-      SubnetId:
-        Ref: SubnetPublic
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-
-          # update and upgrade
-          apt-get update
-          apt-get -y install language-pack-en
-          apt-get -y dist-upgrade
-          apt-get -y upgrade
-
-          # Before you install Docker for the first time
-          # on a new host machine, you need to set up
-          # the Docker repository.
-
-          # install the linux-image-extra-* packages,
-          # which allow Docker to use the aufs storage
-          # drivers
-          apt-get -y install curl \
-            linux-image-extra-$(uname -r) \
-            linux-image-extra-virtual
-
-          # install packages to allow apt to use a
-          # repository over HTTPS
-          apt-get -y install apt-transport-https \
-            ca-certificates
-
-          # add Docker’s official GPG key
-          curl -fsSL https://yum.dockerproject.org/gpg | apt-key add -
-
-          # verify that the key ID is
-          # 58118E89F3A912897C070ADBF76221572C52609D
-          # TODO: This should probably be an if statement
-          apt-key fingerprint \
-            58118E89F3A912897C070ADBF76221572C52609D
-
-          # set up the stable repository
-          add-apt-repository \
-           "deb https://apt.dockerproject.org/repo/ \
-           ubuntu-$(lsb_release -cs) \
-           main"
-
-          apt-get -y update
-
-          # install the latest version of Docker
-          apt-get -y install docker-engine
-
-  IPAssoc:
-    Type: AWS::EC2::EIPAssociation
-    Properties:
-      InstanceId:
-        Ref: Ec2Instance
-      EIP:
-        Ref: EIP
+          Value: ebs-volume-01
+Outputs:
+  SubnetPublic:
+    Value: !Ref SubnetPublic
+    Export:
+      Name: SubnetPublic
+  InstanceSecurityGroup:
+    Value: !Ref InstanceSecurityGroup
+    Export:
+      Name: InstanceSecurityGroup
+  EBSVolume01:
+    Value: !Ref EBSVolume01
+    Export:
+      Name: EBSVolume01
